@@ -7,9 +7,9 @@
 #include <vector>
 #include <random>
 
-typedef float time_t;
-
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
+void APIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity,
+	GLsizei length, const GLchar *message, const void *userParam);
 void processInput(GLFWwindow *window);
 
 template <typename T>
@@ -40,7 +40,7 @@ struct mat4f
 
 /* 
 	Input structs
-	Using GLFW input convetions
+	Using GLFW input conventions
 */
 struct KeyEvent
 {
@@ -99,7 +99,6 @@ struct DirectionalLight {
 struct PointLight {
 	vec3f position;
 	float constant;
-	vec3f ambient;
 	float linear;
 	vec3f diffuse;
 	float quadratic;
@@ -128,8 +127,11 @@ struct Entity
 struct Scene
 {
 	static const int MAX_ENTITIES = 1024;
-	Entity* entities;
+	static const int MAX_LIGHTS = 32;
+	Entity entities[MAX_ENTITIES];
 	unsigned int entity_count;
+	PointLight lights[MAX_LIGHTS];
+	unsigned int light_count;
 };
 
 struct GBuffer
@@ -167,6 +169,8 @@ struct LightingShader
 	GLint positionLoc;
 	GLint normalLoc;
 	GLint albedoSpecLoc;
+
+	GLint viewPosLoc;
 };
 
 //settings
@@ -561,6 +565,9 @@ inline mat4f QuatToMat4f(vec4f q)
 	return m;
 }
 
+/**
+	Should look into lerp-interpolation instead
+*/
 inline vec4f QuatSlerp(const vec4f q1, const vec4f q2, const float t = 1.0f)
 {
 	float omega, cosom, sinom, scale0, scale1;
@@ -699,6 +706,53 @@ mat4f orthographicProjectionMat4f(float l, float r, float b, float t, float n, f
 	return m;
 }
 
+void APIENTRY glDebugOutput(GLenum source,
+	GLenum type,
+	GLuint id,
+	GLenum severity,
+	GLsizei length,
+	const GLchar *message,
+	const void *userParam)
+{
+	// ignore non-significant error/warning codes
+	if (id == 131169 || id == 131185 || id == 131218 || id == 131204) return;
+
+	std::cout << "---------------" << std::endl;
+	std::cout << "Debug message (" << id << "): " << message << std::endl;
+
+	switch (source)
+	{
+	case GL_DEBUG_SOURCE_API:             std::cout << "Source: API"; break;
+	case GL_DEBUG_SOURCE_WINDOW_SYSTEM:   std::cout << "Source: Window System"; break;
+	case GL_DEBUG_SOURCE_SHADER_COMPILER: std::cout << "Source: Shader Compiler"; break;
+	case GL_DEBUG_SOURCE_THIRD_PARTY:     std::cout << "Source: Third Party"; break;
+	case GL_DEBUG_SOURCE_APPLICATION:     std::cout << "Source: Application"; break;
+	case GL_DEBUG_SOURCE_OTHER:           std::cout << "Source: Other"; break;
+	} std::cout << std::endl;
+
+	switch (type)
+	{
+	case GL_DEBUG_TYPE_ERROR:               std::cout << "Type: Error"; break;
+	case GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR: std::cout << "Type: Deprecated Behaviour"; break;
+	case GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR:  std::cout << "Type: Undefined Behaviour"; break;
+	case GL_DEBUG_TYPE_PORTABILITY:         std::cout << "Type: Portability"; break;
+	case GL_DEBUG_TYPE_PERFORMANCE:         std::cout << "Type: Performance"; break;
+	case GL_DEBUG_TYPE_MARKER:              std::cout << "Type: Marker"; break;
+	case GL_DEBUG_TYPE_PUSH_GROUP:          std::cout << "Type: Push Group"; break;
+	case GL_DEBUG_TYPE_POP_GROUP:           std::cout << "Type: Pop Group"; break;
+	case GL_DEBUG_TYPE_OTHER:               std::cout << "Type: Other"; break;
+	} std::cout << std::endl;
+
+	switch (severity)
+	{
+	case GL_DEBUG_SEVERITY_HIGH:         std::cout << "Severity: high"; break;
+	case GL_DEBUG_SEVERITY_MEDIUM:       std::cout << "Severity: medium"; break;
+	case GL_DEBUG_SEVERITY_LOW:          std::cout << "Severity: low"; break;
+	case GL_DEBUG_SEVERITY_NOTIFICATION: std::cout << "Severity: notification"; break;
+	} std::cout << std::endl;
+	std::cout << std::endl;
+}
+
 bool LoadShaderFromFile(const std::string path, const GLint shaderID)
 {
 	FILE * stream;
@@ -733,12 +787,10 @@ bool LoadShaderFromFile(const std::string path, const GLint shaderID)
 	return success;
 }
 
-bool BuildShaderProgram(GLint * program,
-						std::vector<std::string> vertex_shaders, std::vector<std::string> fragment_shaders,
-						std::ostream* log = nullptr)
+bool BuildShaderProgram(GLint * program, std::vector<std::string> vertex_shaders,
+						std::vector<std::string> fragment_shaders, std::ostream* log = nullptr)
 {
 	std::vector<GLint> ids;
-	unsigned int programId;
 	bool success = true;
 	GLint types[] = { GL_VERTEX_SHADER, GL_FRAGMENT_SHADER };
 	std::vector<std::string>* paths[] = { &vertex_shaders, &fragment_shaders };
@@ -832,7 +884,10 @@ bool LoadTextureFromFile(const char * path, unsigned int * id, bool flip = true,
 		glGenerateMipmap(GL_TEXTURE_2D);
 	}
 	else
+	{
+		std::cout << "Error loading texture: " << path << std::endl;
 		return false;
+	}
 	stbi_image_free(data);
 	return true;
 }
@@ -872,6 +927,7 @@ GBuffer createGBuffer()
 	unsigned int attachments[3] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
 	glDrawBuffers(3, attachments);
 
+	// - depth buffer
 	glGenRenderbuffers(1, &gb.depthBuffer);
 	glBindRenderbuffer(GL_RENDERBUFFER, gb.depthBuffer);
 	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, SCR_WIDTH, SCR_HEIGHT);
@@ -900,6 +956,11 @@ GeometryShader createGeometryShader()
 	shader.diffuseLoc = glGetUniformLocation(shader.id, "texture_diffuse");
 	shader.specularLoc = glGetUniformLocation(shader.id, "texture_specular");
 
+	glUseProgram(shader.id);
+
+	glUniform1i(shader.diffuseLoc, 0);
+	glUniform1i(shader.specularLoc, 1);
+
 	return shader;
 }
 
@@ -910,10 +971,17 @@ LightingShader createLightingShader()
 	RUN_ONCE = false;
 
 	LightingShader shader = {};
-	shader.id = BuildShaderProgram(&shader.id, { "light_vs.txt" }, { "light_fs.txt" }, &std::cout);
-	shader.albedoSpecLoc = glGetUniformLocation(shader.id, "albedo");
-	shader.normalLoc = glGetUniformLocation(shader.id, "normal");
-	shader.positionLoc = glGetUniformLocation(shader.id, "position");
+	if (!BuildShaderProgram(&shader.id, { "light_vs.txt" }, { "light_fs.txt" }, &std::cout))
+	{
+		std::cout << "Error creating lighting shader!" << std::endl;
+		return shader;
+	}
+	glUseProgram(shader.id);
+	shader.viewPosLoc = glGetUniformLocation(shader.id, "viewPos");
+
+	glUniform1i(glGetUniformLocation(shader.id, "gPosition"), 0);
+	glUniform1i(glGetUniformLocation(shader.id, "gNormal"), 1);
+	glUniform1i(glGetUniformLocation(shader.id, "gAlbedoSpec"), 2);
 
 	return shader;
 }
@@ -949,47 +1017,74 @@ void renderQuad()
 	glBindVertexArray(0);
 }
 
-void GeometryPass(GeometryShader shader, GBuffer gBuffer, Scene scene, mat4f view, mat4f projection)
+void GeometryPass(GeometryShader shader, GBuffer gBuffer, Scene * scene, mat4f view, mat4f projection)
 {
 	glUseProgram(shader.id);
 
-	//Matrices
+	//Uniforms
 	glUniformMatrix4fv(shader.viewLoc, 1, GL_FALSE, value_ptr(view));
 	glUniformMatrix4fv(shader.projectionLoc, 1, GL_FALSE, value_ptr(projection));
 
 	glBindFramebuffer(GL_FRAMEBUFFER, gBuffer.id);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glEnable(GL_DEPTH_TEST);
 
-	mat4f model;
-	for (int i = 0; i < scene.entity_count; i++)
+	for (unsigned int i = 0; i < scene->entity_count; i++)
 	{
-		model = mat4f_identity();
-		mat4f_rotate_quat(&model, scene.entities[i].orientation);
-		mat4f_translate(&model, scene.entities[i].position);
-		mat4f_scale(&model, scene.entities[i].scale);
+		mat4f model = mat4f_identity();
+		mat4f_translate(&model, scene->entities[i].position);
+		mat4f_rotate_quat(&model, scene->entities[i].orientation);
+		mat4f_scale(&model, scene->entities[i].scale);
 		glUniformMatrix4fv(shader.modelLoc, 1, GL_FALSE, value_ptr(model));
-		glUniform1i(shader.diffuseLoc, scene.entities[i].model.diffuse);
-		glUniform1i(shader.specularLoc, scene.entities[i].model.specular);
-		glBindVertexArray(scene.entities[i].model.vao);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, scene->entities[i].model.diffuse);
+		glActiveTexture(GL_TEXTURE1);
+		glBindTexture(GL_TEXTURE_2D, scene->entities[i].model.specular);
+		glBindVertexArray(scene->entities[i].model.vao);
 		glDrawArrays(GL_TRIANGLES, 0, 36);
 	}
 
-	//glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	//glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	
-	renderQuad();
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void LightingPass(LightingShader shader, GBuffer gBuffer, Scene scene)
+void LightingPass(LightingShader shader, GBuffer gBuffer, Scene * scene, Camera camera)
 {
 	glUseProgram(shader.id);
 
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, gBuffer.id);
+
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, gBuffer.position);
 	glActiveTexture(GL_TEXTURE1);
 	glBindTexture(GL_TEXTURE_2D, gBuffer.normal);
 	glActiveTexture(GL_TEXTURE2);
 	glBindTexture(GL_TEXTURE_2D, gBuffer.albedoSpec);
+
+	for (int i = 0; i < scene->light_count; i++)
+	{
+		glUniform3fv(glGetUniformLocation(shader.id, ("lights[" + std::to_string(i) + "].Position").c_str()), 1, value_ptr(scene->lights[i].position));
+		glUniform3fv(glGetUniformLocation(shader.id, ("lights[" + std::to_string(i) + "].Color").c_str()), 1, value_ptr(scene->lights[i].diffuse));	
+		glUniform1f(glGetUniformLocation(shader.id, ("lights[" + std::to_string(i) + "].Linear").c_str()), scene->lights[i].linear);
+		glUniform1f(glGetUniformLocation(shader.id, ("lights[" + std::to_string(i) + "].Quadratic").c_str()), scene->lights[i].quadratic);
+	}
+
+	glUniform3fv(shader.viewPosLoc, 1, value_ptr(camera.position));
+	glDisable(GL_DEPTH_TEST);
+	renderQuad();
+}
+
+void renderTextureToScreen(GLint screenShaderProgram, GLint textureID)
+{
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glUseProgram(screenShaderProgram);
+	
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, textureID);
+
+	glDisable(GL_DEPTH_TEST);
+	renderQuad();
 }
 
 void pollMouse(GLFWwindow * window, MouseData * mouse)
@@ -1010,7 +1105,7 @@ void pushKeyEvent(KeyEvent key)
 
 KeyEvent pullKeyEvent()
 {
-	
+	return {};
 }
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
@@ -1032,8 +1127,10 @@ int main()
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+	glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
 	glfwWindowHint(GLFW_SAMPLES, 4);
 
+	// Setup window
 	GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "LearnOpenGL", NULL, NULL);
 	if (window == NULL)
 	{
@@ -1053,6 +1150,20 @@ int main()
 		std::cout << "Failed to initialize GLAD" << std::endl;
 		return -1;
 	}
+
+	// Setup debugging
+	GLint flags; 
+	glGetIntegerv(GL_CONTEXT_FLAGS, &flags);
+	if (flags & GL_CONTEXT_FLAG_DEBUG_BIT)
+	{
+		glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
+		glEnable(GL_DEBUG_OUTPUT);
+		glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+		glDebugMessageCallback(glDebugOutput, nullptr);
+		glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, GL_TRUE);
+	}
+
+	glEnable(GL_DEPTH_TEST);
 	
 	// set up vertex data (and buffer(s)) and configure vertex attributes
 	// ------------------------------------------------------------------
@@ -1127,24 +1238,12 @@ int main()
 	LoadTextureFromFile("container2_specular.png", &steelframed_container_specular, false);
 	LoadTextureFromFile("awesomeface.png", &awesomeface_texture, false);
 	LoadTextureFromFile("matrix.jpg", &matrix_texture, false);
-	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, wooden_container_texture);
-	glActiveTexture(GL_TEXTURE1);
-	glBindTexture(GL_TEXTURE_2D, awesomeface_texture);
-	glActiveTexture(GL_TEXTURE2);
-	glBindTexture(GL_TEXTURE_2D, steelframed_container_texture);
-	glActiveTexture(GL_TEXTURE3);
-	glBindTexture(GL_TEXTURE_2D, steelframed_container_specular);
-	glActiveTexture(GL_TEXTURE4);
-	glBindTexture(GL_TEXTURE_2D, matrix_texture);
 
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	glBindVertexArray(0); //Usually not needed.
-
-	glPolygonMode(GL_FRONT, GL_TRIANGLES);
-
+	
 	float t = 0.f;
-	float timeStep = 0.01f;
+	float timeStep = 1.f / 144.f;
 	float dt = 0.f;
 
 	//Mouse
@@ -1157,26 +1256,53 @@ int main()
 	camera.up = { 0.f, 1.f, 0.f };
 	camera.position = { 0.f, 0.f, -1.f };
 	float cameraSpeed = 5.f;
-	float cameraSpeedFast = 10.f;
+	float cameraSpeedFast = 20.f;
 
 	//Scene
-	Scene scene = {};
-	scene.entities = (Entity*)malloc(sizeof(Entity) * Scene::MAX_ENTITIES);
-	for (int i = 0; i < 100; i++)
+	Scene * scene = (Scene*)calloc(1, sizeof(Scene));
 	{
-		Entity cubeEntity = {};
-		cubeEntity.model.diffuse = steelframed_container_texture;
-		cubeEntity.model.specular = steelframed_container_specular;
-		cubeEntity.model.vao = VAO;
-		cubeEntity.position = { randf(-10.f, 10.f), randf(-10.f, 10.f), randf(-10.f, 10.f) };
-		cubeEntity.scale = { 1.f, 1.f, 1.f };
-		cubeEntity.orientation = EulerToQuat(0.f, 0.f, 0.f);
-		scene.entities[scene.entity_count++] = cubeEntity;
+		int dim = powf(Scene::MAX_ENTITIES, 1.f / 3);
+		for (int i = 0; i < dim; i++)
+		{
+			float d = 5.f;
+			float m = dim * d / 2;
+				for (int j = 0; j < dim; j++)
+				{
+					for (int k = 0; k < dim; k++)
+					{
+						Entity cubeEntity = {};
+						cubeEntity.model.diffuse = steelframed_container_texture;
+						cubeEntity.model.specular = steelframed_container_specular;
+						cubeEntity.model.vao = VAO;
+						cubeEntity.position = { (float)i * d - m, (float)j * d - m, (float)k * d - m};
+						cubeEntity.scale = { 1.f, 1.f, 1.f };
+						//cubeEntity.orientation = EulerToQuat(randf(0.f, 1.f), randf(0.f, 1.f), randf(0.f, 1.f));
+						scene->entities[scene->entity_count++] = cubeEntity;
+						if (scene->entity_count > Scene::MAX_ENTITIES)
+							break;
+					}
+				}
+		}
+	}
+
+	for (int i = 0; i < Scene::MAX_LIGHTS; i++)
+	{
+		float variance = 1000.f;
+		scene->lights[i].constant = 1.f;
+		scene->lights[i].position = { randf(-variance, variance), randf(-variance, variance), randf(-variance, variance) };
+		scene->lights[i].diffuse = { randf(0.f, .5f), randf(0.f, .5f), randf(0.f, .5f) };
+		scene->lights[i].intensity = 1.f;
+		scene->lights[i].linear = 0.7f;
+		scene->lights[i].quadratic = .8f;
+		scene->lights[i].specular = { 1.f, 1.f, 1.f };
+		scene->light_count++;
 	}
 
 	//Shaders
 	GeometryShader geometryShader = createGeometryShader();
 	LightingShader lightingShader = createLightingShader();
+	GLint screenShaderProgram;
+	BuildShaderProgram(&screenShaderProgram, { "screen_shader_vs.txt" }, { "screen_shader_fs.txt" }, &std::cout);
 
 	//GBuffer
 	GBuffer gBuffer = createGBuffer();
@@ -1199,9 +1325,9 @@ int main()
 		if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
 			speed = cameraSpeedFast;
 		if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-			movement = add_vec3f(movement, scale_vec3f(side, speed * dt));
-		if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
 			movement = add_vec3f(movement, scale_vec3f(side, -speed * dt));
+		if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+			movement = add_vec3f(movement, scale_vec3f(side, speed * dt));
 		if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
 			movement = add_vec3f(movement, scale_vec3f(camera.forward, speed * dt));
 		if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
@@ -1220,8 +1346,8 @@ int main()
 		}
 
 		camera.position = add_vec3f(camera.position, movement);
-		float pitch = (mouse.last_x - mouse.x) * mouse_sensitivity;
-		float roll = (mouse.y - mouse.last_y) * mouse_sensitivity;
+		float pitch = (mouse.x - mouse.last_x) * mouse_sensitivity;
+		float roll = (mouse.last_y - mouse.y) * mouse_sensitivity;
 
 		camera.forward = rotate_vec3f_around_axis(camera.forward, side, roll * 5.f);
 		camera.forward = rotate_vec3f_around_axis(camera.forward, camera.up, pitch * 5.f);
@@ -1230,16 +1356,11 @@ int main()
 		if (dot_vec3f(camera.forward, cross_vec3f(side, camera.up)) < 0.f)
 			camera.forward = normalize_vec3f(sub_vec3f(scale_vec3f(camera.up, 3.f * dot_vec3f(camera.forward, camera.up)), camera.forward));
 
-		GeometryPass(geometryShader, gBuffer, scene, lookAt(camera), frustumProjectionMat4f(85.f, (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.f));
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, gBuffer.id);
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); // write to default framebuffer
-												   // blit to default framebuffer. Note that this may or may not work as the internal formats of both the FBO and default framebuffer have to match.
-												   // the internal formats are implementation defined. This works on all of my systems, but if it doesn't on yours you'll likely have to write to the 		
-												   // depth buffer in another shader stage (or somehow see to match the default framebuffer's internal format with the FBO's internal format).
-		glBlitFramebuffer(0, 0, SCR_WIDTH, SCR_HEIGHT, 0, 0, SCR_WIDTH, SCR_HEIGHT, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		glDrawBuffer(gBuffer.id);
-
+		GeometryPass(geometryShader, gBuffer, scene, lookAt(camera), frustumProjectionMat4f(85.f, (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 1000.f));
+		
+		LightingPass(lightingShader, gBuffer, scene, camera);
+		
+		//renderTextureToScreen(screenShaderProgram, steelframed_container_specular);
 
 		glfwSwapBuffers(window);
 		glfwPollEvents();
@@ -1256,6 +1377,9 @@ int main()
 	//0 optional: de-allocate all resources once they've outlived their purpose:
 	glDeleteVertexArrays(1, &VAO);
 	glDeleteBuffers(1, &VBO);
+
+	// Free mallocs
+	free(scene);
 
 	// glfw: terminate, clearing all previously allocated GLFW resources.
 	glfwTerminate();
