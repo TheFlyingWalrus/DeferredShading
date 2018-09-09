@@ -130,7 +130,23 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="glfw3.h" />
+    <ClInclude Include="resource.h" />
     <ClInclude Include="stb_image.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="g_buffer_fs.glsl" />
+    <Text Include="g_buffer_vs.glsl" />
+    <Text Include="lightbox_vs.glsl" />
+    <Text Include="light_fs.glsl" />
+    <Text Include="light_vs.glsl" />
+    <Text Include="screen_shader_fs.glsl" />
+    <Text Include="screen_shader_vs.glsl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="DeferredShading.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="lightbox_fs.glsl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

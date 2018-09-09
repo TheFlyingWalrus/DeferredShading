@@ -29,5 +29,25 @@
     <ClInclude Include="stb_image.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="resource.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="g_buffer_vs.glsl" />
+    <Text Include="g_buffer_fs.glsl" />
+    <Text Include="light_fs.glsl" />
+    <Text Include="light_vs.glsl" />
+    <Text Include="screen_shader_fs.glsl" />
+    <Text Include="screen_shader_vs.glsl" />
+    <Text Include="lightbox_vs.glsl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="DeferredShading.rc">
+      <Filter>Resource Files</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="lightbox_fs.glsl" />
   </ItemGroup>
 </Project>

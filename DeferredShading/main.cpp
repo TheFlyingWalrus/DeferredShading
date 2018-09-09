@@ -98,7 +98,6 @@ struct DirectionalLight {
 
 struct PointLight {
 	vec3f position;
-	float constant;
 	float linear;
 	vec3f diffuse;
 	float quadratic;
@@ -114,12 +113,16 @@ struct Model
 	//Texture data
 	GLint diffuse;
 	GLint specular;
+
+	int vertexCount;
 };
 
 struct Entity
 {
 	Model model;
 	vec3f position;
+	vec3f velocity;
+	vec4f rotation;
 	vec4f orientation;
 	vec3f scale;
 };
@@ -162,6 +165,8 @@ struct GeometryShader
 
 struct LightingShader
 {
+	static const size_t MAX_POINT_LIGHTS = 32;
+
 	//Identifier
 	GLint id;
 
@@ -171,6 +176,10 @@ struct LightingShader
 	GLint albedoSpecLoc;
 
 	GLint viewPosLoc;
+	GLint pointLightCountLoc;
+
+	//Uniform blocks
+	GLuint pointLightsBlock;
 };
 
 //settings
@@ -892,6 +901,11 @@ bool LoadTextureFromFile(const char * path, unsigned int * id, bool flip = true,
 	return true;
 }
 
+void loadModel(const char * path)
+{
+
+}
+
 GBuffer createGBuffer()
 {
 	GBuffer gb;
@@ -948,7 +962,7 @@ GeometryShader createGeometryShader()
 	RUN_ONCE = false;
 
 	GeometryShader shader;
-	BuildShaderProgram(&shader.id, { "g_buffer_vs.txt" }, { "g_buffer_fs.txt" }, &std::cout);
+	BuildShaderProgram(&shader.id, { "g_buffer_vs.glsl" }, { "g_buffer_fs.glsl" }, &std::cout);
 	shader.projectionLoc = glGetUniformLocation(shader.id, "projection");
 	shader.viewLoc = glGetUniformLocation(shader.id, "view");
 	shader.modelLoc = glGetUniformLocation(shader.id, "model");
@@ -964,34 +978,43 @@ GeometryShader createGeometryShader()
 	return shader;
 }
 
-LightingShader createLightingShader()
+LightingShader createLightingShader(PointLight * pointLightsBuffer, size_t pointLightsBufferSize)
 {
 	static bool RUN_ONCE = true;
 	assert(RUN_ONCE);
 	RUN_ONCE = false;
 
 	LightingShader shader = {};
-	if (!BuildShaderProgram(&shader.id, { "light_vs.txt" }, { "light_fs.txt" }, &std::cout))
+	if (!BuildShaderProgram(&shader.id, { "light_vs.glsl" }, { "light_fs.glsl" }, &std::cout))
 	{
 		std::cout << "Error creating lighting shader!" << std::endl;
 		return shader;
 	}
 	glUseProgram(shader.id);
 	shader.viewPosLoc = glGetUniformLocation(shader.id, "viewPos");
+	shader.pointLightCountLoc = glGetUniformLocation(shader.id, "pointLightCount");
 
 	glUniform1i(glGetUniformLocation(shader.id, "gPosition"), 0);
 	glUniform1i(glGetUniformLocation(shader.id, "gNormal"), 1);
 	glUniform1i(glGetUniformLocation(shader.id, "gAlbedoSpec"), 2);
+
+	// Allocating lights buffer object and binding to block
+	glGenBuffers(1, &shader.pointLightsBlock);
+	glBindBuffer(GL_UNIFORM_BUFFER, shader.pointLightsBlock);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 1, shader.pointLightsBlock);
+	glBufferData(GL_UNIFORM_BUFFER, pointLightsBufferSize, pointLightsBuffer, GL_DYNAMIC_DRAW);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
 	return shader;
 }
 
 // renderQuad() renders a 1x1 XY quad in NDC
 // -----------------------------------------
-unsigned int quadVAO = 0;
-unsigned int quadVBO;
 void renderQuad()
 {
+	static unsigned int quadVAO = 0;
+	static unsigned int quadVBO;
+
 	if (quadVAO == 0)
 	{
 		float quadVertices[] = {
@@ -1032,8 +1055,8 @@ void GeometryPass(GeometryShader shader, GBuffer gBuffer, Scene * scene, mat4f v
 	for (unsigned int i = 0; i < scene->entity_count; i++)
 	{
 		mat4f model = mat4f_identity();
-		mat4f_translate(&model, scene->entities[i].position);
 		mat4f_rotate_quat(&model, scene->entities[i].orientation);
+		mat4f_translate(&model, scene->entities[i].position);
 		mat4f_scale(&model, scene->entities[i].scale);
 		glUniformMatrix4fv(shader.modelLoc, 1, GL_FALSE, value_ptr(model));
 		glActiveTexture(GL_TEXTURE0);
@@ -1062,17 +1085,47 @@ void LightingPass(LightingShader shader, GBuffer gBuffer, Scene * scene, Camera 
 	glActiveTexture(GL_TEXTURE2);
 	glBindTexture(GL_TEXTURE_2D, gBuffer.albedoSpec);
 
-	for (int i = 0; i < scene->light_count; i++)
-	{
-		glUniform3fv(glGetUniformLocation(shader.id, ("lights[" + std::to_string(i) + "].Position").c_str()), 1, value_ptr(scene->lights[i].position));
-		glUniform3fv(glGetUniformLocation(shader.id, ("lights[" + std::to_string(i) + "].Color").c_str()), 1, value_ptr(scene->lights[i].diffuse));	
-		glUniform1f(glGetUniformLocation(shader.id, ("lights[" + std::to_string(i) + "].Linear").c_str()), scene->lights[i].linear);
-		glUniform1f(glGetUniformLocation(shader.id, ("lights[" + std::to_string(i) + "].Quadratic").c_str()), scene->lights[i].quadratic);
-	}
+	//Update pointlights
+	glBindBuffer(GL_UNIFORM_BUFFER, shader.pointLightsBlock);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PointLight) * scene->light_count, scene->lights);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
+	//Update uniforms
 	glUniform3fv(shader.viewPosLoc, 1, value_ptr(camera.position));
+	glUniform1i(shader.pointLightCountLoc, scene->light_count);
+
 	glDisable(GL_DEPTH_TEST);
 	renderQuad();
+}
+
+void renderLights(GLuint shaderProgram, GBuffer gBuffer, PointLight* lights, size_t lightsCount, Model lightModel, mat4f projection, mat4f view)
+{
+	glUseProgram(shaderProgram);
+
+	glBindVertexArray(lightModel.vao);
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, gBuffer.id);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); // write to default framebuffer
+	glBlitFramebuffer(
+		0, 0, SCR_WIDTH, SCR_HEIGHT, 0, 0, SCR_WIDTH, SCR_HEIGHT, GL_DEPTH_BUFFER_BIT, GL_NEAREST
+	);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, value_ptr(projection));
+	glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, value_ptr(view));
+
+	glEnable(GL_DEPTH_TEST);
+
+	for (int i = 0; i < lightsCount; i++)
+	{
+		mat4f model = mat4f_identity();
+		mat4f_translate(&model, lights[i].position);
+		glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, value_ptr(model));
+		glUniform3fv(glGetUniformLocation(shaderProgram, "lightColor"), 1, value_ptr(lights[i].diffuse));
+		glDrawArrays(GL_TRIANGLE_STRIP, 0, 36);
+	}
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 }
 
 void renderTextureToScreen(GLint screenShaderProgram, GLint textureID)
@@ -1258,6 +1311,13 @@ int main()
 	float cameraSpeed = 5.f;
 	float cameraSpeedFast = 20.f;
 
+	//Models
+	Model boxModel = {};
+	boxModel.diffuse = steelframed_container_texture;
+	boxModel.specular = steelframed_container_specular;
+	boxModel.vao = VAO;
+	boxModel.vertexCount = sizeof(vertices);
+
 	//Scene
 	Scene * scene = (Scene*)calloc(1, sizeof(Scene));
 	{
@@ -1271,11 +1331,10 @@ int main()
 					for (int k = 0; k < dim; k++)
 					{
 						Entity cubeEntity = {};
-						cubeEntity.model.diffuse = steelframed_container_texture;
-						cubeEntity.model.specular = steelframed_container_specular;
-						cubeEntity.model.vao = VAO;
+						cubeEntity.model = boxModel;
 						cubeEntity.position = { (float)i * d - m, (float)j * d - m, (float)k * d - m};
 						cubeEntity.scale = { 1.f, 1.f, 1.f };
+						cubeEntity.velocity = { randf(-1.f, 1.f), randf(-1.f, 1.f), randf(-1.f, 1.f) };
 						//cubeEntity.orientation = EulerToQuat(randf(0.f, 1.f), randf(0.f, 1.f), randf(0.f, 1.f));
 						scene->entities[scene->entity_count++] = cubeEntity;
 						if (scene->entity_count > Scene::MAX_ENTITIES)
@@ -1285,24 +1344,27 @@ int main()
 		}
 	}
 
-	for (int i = 0; i < Scene::MAX_LIGHTS; i++)
+	for (int i = 0; i < 5; i++)
 	{
-		float variance = 1000.f;
-		scene->lights[i].constant = 1.f;
+		float variance = 25.f;
+		//scene->lights[i].position = { 0.f, 0.f, 0.f };
 		scene->lights[i].position = { randf(-variance, variance), randf(-variance, variance), randf(-variance, variance) };
-		scene->lights[i].diffuse = { randf(0.f, .5f), randf(0.f, .5f), randf(0.f, .5f) };
+		//scene->lights[i].diffuse = { 1.f, 1.f, 1.f };
+		scene->lights[i].diffuse = { randf(0.5f, 1.f), randf(0.5f, 1.f), randf(0.5f, 1.f) };
 		scene->lights[i].intensity = 1.f;
-		scene->lights[i].linear = 0.7f;
-		scene->lights[i].quadratic = .8f;
+		scene->lights[i].linear = .1f;
+		scene->lights[i].quadratic = .2f;
 		scene->lights[i].specular = { 1.f, 1.f, 1.f };
 		scene->light_count++;
 	}
 
 	//Shaders
 	GeometryShader geometryShader = createGeometryShader();
-	LightingShader lightingShader = createLightingShader();
+	LightingShader lightingShader = createLightingShader(scene->lights, sizeof(PointLight) * scene->MAX_LIGHTS);
 	GLint screenShaderProgram;
-	BuildShaderProgram(&screenShaderProgram, { "screen_shader_vs.txt" }, { "screen_shader_fs.txt" }, &std::cout);
+	BuildShaderProgram(&screenShaderProgram, { "screen_shader_vs.glsl" }, { "screen_shader_fs.glsl" }, &std::cout);
+	GLint lightboxShaderProgram;
+	BuildShaderProgram(&lightboxShaderProgram, { "lightbox_vs.glsl" }, { "lightbox_fs.glsl" }, &std::cout);
 
 	//GBuffer
 	GBuffer gBuffer = createGBuffer();
@@ -1313,6 +1375,9 @@ int main()
 
 	//Callbacks
 	glfwSetKeyCallback(window, key_callback);
+
+	//Matrices
+	mat4f projection = frustumProjectionMat4f(85.f, (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 1000.f);
 
 	while (!glfwWindowShouldClose(window))
 	{
@@ -1336,15 +1401,6 @@ int main()
 			camera.up = rotate_vec3f_around_axis(camera.up, cross_vec3f(camera.up, side), 0.0001f * dt);
 		if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS)
 			camera.up = rotate_vec3f_around_axis(camera.up, cross_vec3f(camera.up, side), -0.0001f * dt);
-		if (glfwGetKey(window, GLFW_KEY_1) == GLFW_PRESS)
-		{
-			if (!gamma_correct)
-				gamma = 2.2f;
-			else
-				gamma = 1.f;
-			gamma_correct = !gamma_correct;
-		}
-
 		camera.position = add_vec3f(camera.position, movement);
 		float pitch = (mouse.x - mouse.last_x) * mouse_sensitivity;
 		float roll = (mouse.last_y - mouse.y) * mouse_sensitivity;
@@ -1356,11 +1412,17 @@ int main()
 		if (dot_vec3f(camera.forward, cross_vec3f(side, camera.up)) < 0.f)
 			camera.forward = normalize_vec3f(sub_vec3f(scale_vec3f(camera.up, 3.f * dot_vec3f(camera.forward, camera.up)), camera.forward));
 
-		GeometryPass(geometryShader, gBuffer, scene, lookAt(camera), frustumProjectionMat4f(85.f, (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 1000.f));
+		// Update entities
+		for (int i = 0; i<scene->entity_count; i++)
+		{
+			scene->entities[i].position = add_vec3f(scene->entities[i].position, scale_vec3f(scene->entities[i].velocity, dt));
+		}
+
+		GeometryPass(geometryShader, gBuffer, scene, lookAt(camera), projection);
 		
 		LightingPass(lightingShader, gBuffer, scene, camera);
 		
-		//renderTextureToScreen(screenShaderProgram, steelframed_container_specular);
+		renderLights(lightboxShaderProgram, gBuffer, scene->lights, scene->light_count, boxModel, projection, lookAt(camera));
 
 		glfwSwapBuffers(window);
 		glfwPollEvents();
