@@ -38,7 +38,8 @@ void main()
     for(int i = 0; i < pointLightCount; ++i)
     {
         // diffuse
-        vec3 lightDir = normalize(pointLights[i].position - FragPos);
+		vec3 lightVec = pointLights[i].position - FragPos;
+        vec3 lightDir = normalize(lightVec);
 		float dirFactor = max(dot(Normal, lightDir), 0.0);
         vec3 diffuse = dirFactor * Albedo * pointLights[i].diffuse;
         lighting += diffuse;
@@ -46,6 +47,10 @@ void main()
 		// specular
 		float specLight = pow(max(dot(viewDir, reflect(-lightDir, Normal)), 0.0), 128) * Specular;
 		//lighting += specLight * pointLights[i].specular;
+
+		//Attenuation and intensity
+		float distance = length(lightVec); 
+		lighting *= 1.0 / (1.0 + pointLights[i].linear * distance + pointLights[i].quadratic * (distance * distance)); 
 		lighting *= pointLights[i].intensity;
     }
     
